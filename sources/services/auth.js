@@ -121,12 +121,11 @@ class Auth {
 				webix.storage.local.put("user", user);
 			});
 		}
-		else {
-			return new Promise((resolve, reject) => {
-				webix.storage.local.put(constants.KEY_ACCEPT_TERMS, true);
-				resolve();
-			});
-		}
+
+		return new Promise((resolve) => {
+			webix.storage.local.put(constants.KEY_ACCEPT_TERMS, true);
+			resolve();
+		});
 	}
 
 	showMainPage() {
@@ -187,24 +186,31 @@ class OAuthISIC extends Auth {
 				.then((_legacyToken) => {
 					if (_legacyToken) {
 						webix.storage.local.put("authToken", _legacyToken);
-						return ajax.getUserInfo();
+						return Promise.all([
+							ajax.getUserInfo(),
+							ajax.getNewUserInfo()
+						]);
 					}
 					return null;
 				})
-				.then((user) => {
-					if (user) {
-						webix.storage.local.put("user", user);
+				.then(([userInfoOldApi, userInfoNewApi]) => {
+					if (userInfoOldApi) {
+						if (userInfoOldApi && userInfoNewApi && userInfoNewApi.accepted_terms) {
+							userInfoOldApi.permissions.acceptTerms = true;
+						}
+						webix.storage.local.put("user", userInfoOldApi);
 						// trigger event
 						state.app.callEvent("login");
 					}
 				})
 				.catch(() => {
-					client.logout();
+					console.error("Authentication: Something went wrong");
 				});
 		}
 	}
 
 	login() {
+		webix.storage.local.put(constants.KEY_ACCEPT_TERMS, false);
 		client.redirectToLogin();
 	}
 
@@ -213,6 +219,7 @@ class OAuthISIC extends Auth {
 			.then(() => {
 				webix.storage.local.remove("user");
 				webix.storage.local.remove("authToken");
+				webix.storage.local.put(constants.KEY_ACCEPT_TERMS, false);
 				gallerySelectedImages.clearImagesForDownload();
 				gallerySelectedImages.clearImagesForStudies();
 				appliedFilters.clearAll();
@@ -232,8 +239,51 @@ class OAuthISIC extends Auth {
 	getClient() {
 		return client;
 	}
+
+	acceptTermOfUse() {
+		const user = this.getUserInfo();
+		if (user) {
+			return ajax.putUserTermsOfUse(true)
+				.then(async () => {
+					const userInfoNewApi = await ajax.getNewUserInfo();
+					if (userInfoNewApi && userInfoNewApi.accepted_terms) {
+						user.permissions.acceptTerms = true;
+						webix.storage.local.put("user", user);
+					}
+				});
+		}
+		return new Promise((resolve) => {
+			webix.storage.local.put(constants.KEY_ACCEPT_TERMS, true);
+			resolve();
+		});
+	}
+
+	refreshUserInfo() {
+		return Promise.all(
+			ajax.getUserInfo(),
+			ajax.getNewUserInfo()
+		)
+			.then(([userInfo, userInfoNewApi]) => {
+				if (userInfo && userInfoNewApi && userInfoNewApi.accepted_terms) {
+					userInfo.permissions.acceptTerms = true;
+				}
+				if (userInfo && this.isUserInfoChanged(userInfo)) {
+					webix.alert({
+						title: "Close",
+						text: "Your user permissions or other information have been changed",
+						callback() {
+							webix.storage.local.put("user", userInfo);
+							state.app.refresh();
+						}
+					});
+				}
+				return userInfo;
+			});
+	}
 }
 
 const instance = state.authorization_mode === "Legacy" ? new Auth() : new OAuthISIC();
+
+state.auth = instance;
 
 export default instance;

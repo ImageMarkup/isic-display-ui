@@ -3,7 +3,7 @@
  */
 const state = {
 	app: {}, // init in app.js
-	auth: {}, // init in
+	auth: {}, // init in auth.js
 	datasetMapForFilters: {}, // init in models/imagesFilters
 	dashboard: { // state of dashboard page
 		selectedDatasetIdsSet: new Set(),
