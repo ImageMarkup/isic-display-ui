@@ -3,11 +3,14 @@ import WZoom from "vanilla-js-wheel-zoom";
 
 import constants from "../../constants";
 import appliedFilterModel from "../../models/appliedFilters";
+import collectionsModel from "../../models/collectionsModel";
+import facetsModel from "../../models/facets";
 import galleryImagesUrls from "../../models/galleryImagesUrls";
 import filtersData from "../../models/imagesFilters";
 import lesionsModel from "../../models/lesionsModel";
 import selectedImages from "../../models/selectedGalleryImages";
 import state from "../../models/state";
+import logger from "../../utils/logger";
 import util from "../../utils/util";
 import filtersFormElements from "../../views/subviews/gallery/parts/filtersFormElements";
 import metadataPart from "../../views/subviews/gallery/parts/metadata";
@@ -16,6 +19,8 @@ import ajax from "../ajaxActions";
 import authService from "../auth";
 import filterService from "./filter";
 import searchButtonModel from "./searchButtonModel";
+import searchSuggestService from "./searchSuggest";
+import suggestService from "./suggest";
 
 const layoutHeightAfterHide = 1;
 const layoutHeightAfterShow = 32;
@@ -57,7 +62,8 @@ class GalleryService {
 		imageWindowTemplateWithoutControls,
 		enlargeContextMenu,
 		portraitClearAllFiltersTemplate,
-		landscapeClearAllFiltersTemplate
+		landscapeClearAllFiltersTemplate,
+		searchSuggest,
 	) {
 		this._view = view;
 		this._pager = pager;
@@ -90,6 +96,7 @@ class GalleryService {
 		this._enlargeContextMenu = enlargeContextMenu;
 		this._portraitClearAllFiltersTemplate = portraitClearAllFiltersTemplate;
 		this._landscapeClearAllFiltersTemplate = landscapeClearAllFiltersTemplate;
+		this._searchSuggest = searchSuggest;
 		this._init();
 	}
 
@@ -200,6 +207,7 @@ class GalleryService {
 	_init() {
 		const self = this;
 		webix.extend(this._imagesDataview, webix.OverlayBox);
+		this._searchInput.disable();
 		this._createStudyButton = this._view.$scope.getCreateStudyButton();
 		this._dataviewYCountSelection = this._view.$scope.getDataviewYCountSelection();
 		this._imageTemplate = $$(imageWindow.getViewerId());
@@ -312,9 +320,15 @@ class GalleryService {
 			}
 		});
 
-		this._searchInput.attachEvent("onAfterRender", () => {
-
-		});
+		// Suggest start
+		if (this._searchSuggest) {
+			searchSuggestService.attachEvents(
+				this._searchSuggest,
+				this._searchInput,
+				this._leftPanelToggleButton
+			);
+		}
+		// Suggest end
 
 		let dataviewSelectionId = util.getDataviewSelectionId()
 			? util.getDataviewSelectionId() : constants.DEFAULT_DATAVIEW_COLUMNS;
@@ -453,6 +467,7 @@ class GalleryService {
 				state.imagesOffset = offset;
 			}
 			catch (error) {
+				logger.error(error);
 				if (!this._view.$destructed) {
 					webix.message("DataRequest: Something went wrong");
 				}
@@ -615,6 +630,7 @@ class GalleryService {
 				}
 			}
 			catch (error) {
+				logger.error(error);
 				if (!this._view.$destructed) {
 					webix.message("ShowMetadata: Something went wrong");
 				}
@@ -712,13 +728,15 @@ class GalleryService {
 				let isNeedShowAlert = true;
 				let countSelectedFilteredImages = 0;
 				let filter = appliedFilterModel.getConditionsForApi();
+				const collections = collectionsModel.getAppliedCollectionsForApi();
 				let imagesLimit = constants.MAX_COUNT_IMAGES_SELECTION;
 				let arrayOfImagesLength = selectedImages.countForStudies();
 				const sourceParams = {
 					limit: imagesLimit,
 					sort: "name",
 					detail: "false",
-					filter
+					filter,
+					collections
 				};
 				if (arrayOfImagesLength === imagesLimit) {
 					webix.alert({
@@ -1073,6 +1091,15 @@ class GalleryService {
 			state.imagesTotalCounts = {};
 			state.imagesTotalCounts.passedFilters = {};
 			const images = await ajax.getImages();
+			const pinnedCollectionOptions = {
+				limit: 0,
+				pinned: true,
+				sort: "name"
+			};
+			const pinnedCollectionsData = await ajax.getCollections(pinnedCollectionOptions);
+			collectionsModel.clearPinnedCollections();
+			collectionsModel.setPinnedCollections(pinnedCollectionsData);
+
 			state.imagesTotalCounts.passedFilters.count = images.count ? images.count : 0;
 			this._updateContentHeaderTemplate(
 				{
@@ -1085,12 +1112,33 @@ class GalleryService {
 			const facets = await ajax.getFacets();
 			const ids = Object.keys(facets);
 			ids.forEach((id) => {
-				state.imagesTotalCounts[id] = facets[id].buckets;
-				state.imagesTotalCounts[id].push({
-					key: constants.MISSING_KEY_VALUE,
-					doc_count: facets[id]?.meta?.missing_count
-				});
+				state.imagesTotalCounts[id] = webix.copy(facets[id].buckets);
+				if (id !== constants.COLLECTION_KEY) {
+					state.imagesTotalCounts[id].push({
+						key: constants.MISSING_KEY_VALUE,
+						doc_count: facets[id]?.meta?.missing_count
+					});
+				}
+				if (id === constants.COLLECTION_KEY) {
+					state.imagesTotalCounts[id].length = 0;
+					pinnedCollectionsData.results.forEach((pc) => {
+						state.imagesTotalCounts[id].push({
+							key: pc.id,
+							name: pc.name,
+						});
+					});
+				}
+				const facetValues = state.imagesTotalCounts[id].map(
+					f => f.key
+				);
+				facetsModel.addFacet(id, facetValues);
 			});
+			if (this._searchSuggest) {
+				await suggestService.buildSuggestionsForFilter(this._searchSuggest);
+				const suggestions = suggestService.getSuggestionsForFilter();
+				this._searchSuggest.getList().parse(suggestions);
+			}
+			this._searchInput.enable();
 			let appliedFiltersArray = appliedFilterModel.getFiltersArray();
 			const paramFilters = this._view.$scope.getParam("filter");
 			if (appliedFiltersArray.length) {
@@ -1105,7 +1153,9 @@ class GalleryService {
 							try {
 								const parsedFilters = JSON.parse(paramFilters);
 								appliedFiltersArray = appliedFilterModel.getFiltersFromURL(parsedFilters);
-								this._view.$scope.app.callEvent("filtersChanged", [appliedFiltersArray]);
+								if (appliedFiltersArray) {
+									this._view.$scope.app.callEvent("filtersChanged", [appliedFiltersArray]);
+								}
 							}
 							catch (err) {
 								this._view.$scope.setParam("filter", "[]", true);
@@ -1132,6 +1182,7 @@ class GalleryService {
 			if (!paramFilters && !appliedFiltersArray.length) this._reload();
 		}
 		catch (error) {
+			logger.error(error);
 			if (!this._view.$destructed) {
 				webix.message("Load: Something went wrong");
 			}
@@ -1159,6 +1210,9 @@ class GalleryService {
 			if (ranges.currentCount) {
 				state.filteredImages.filteredImagesCount = ranges.currentCount;
 			}
+			else if (ranges.currentCount === 0) {
+				state.filteredImages.filteredImagesCount = 0;
+			}
 		}
 		const values = webix.copy(ranges);
 		this._contentHeaderTemplate?.setValues(values, true); // true -> unchange existing values
@@ -1168,12 +1222,15 @@ class GalleryService {
 	async _updateCounts() {
 		try {
 			const filterQuery = appliedFilterModel.getConditionsForApi();
+			const appliedCollections = collectionsModel.getAppliedCollectionsForApi();
 			const params = {};
 			params.conditions = filterQuery;
+			params.collections = appliedCollections;
 			const facets = await ajax.getFacets(params);
 			filterService.updateFiltersCounts(facets);
 		}
 		catch (error) {
+			logger.error(error);
 			if (!this._view.$destructed) {
 				webix.message("UpdateCount: Something went wrong");
 			}
@@ -1269,15 +1326,17 @@ class GalleryService {
 				return;
 			}
 			const filter = appliedFilterModel.getConditionsForApi();
+			const collections = collectionsModel.getAppliedCollectionsForApi();
 			const images = url
 				? await ajax.getImagesByUrl(url)
 				: await ajax.getImages({
 					limit,
-					filter
+					filter,
+					collections
 				});
 			state.imagesTotalCounts.passedFilters.currentCount = images.count;
 			const start = offset !== 0 ? offset : 1;
-			if (filter) {
+			if (filter || collections) {
 				state.imagesTotalCounts.passedFilters.filtered = true;
 				state.imagesTotalCounts.passedFilters.currentCount = images.count;
 				this._updateContentHeaderTemplate({
@@ -1321,6 +1380,7 @@ class GalleryService {
 			this._updatePagerCount(images.count);
 		}
 		catch (error) {
+			logger.error(error);
 			if (!this._view.$destructed) {
 				this._view.hideProgress();
 			}
