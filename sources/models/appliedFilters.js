@@ -40,6 +40,7 @@ function prepareDataForList() {
 		switch (filter.view) {
 			case "checkbox":
 			case "rangeCheckbox":
+			case constants.FILTER_ELEMENT_TYPE.TREE_CHECKBOX:
 			{
 				result.push(webix.copy(filter));
 				break;
@@ -93,6 +94,21 @@ function processNewFilter(filter) {
 			else {
 				filter.id = checkboxId;
 				if (!appliedFilters.exists(checkboxId)) {
+					appliedFilters.add(filter);
+				}
+			}
+			break;
+		}
+		case constants.FILTER_ELEMENT_TYPE.TREE_CHECKBOX: {
+			const optionId = filter.optionId;
+			if (filter.remove) {
+				if (appliedFilters.exists(optionId)) {
+					appliedFilters.remove(optionId);
+				}
+			}
+			else {
+				filter.id = optionId;
+				if (!appliedFilters.exists(optionId)) {
 					appliedFilters.add(filter);
 				}
 			}
@@ -356,6 +372,20 @@ function _groupFiltersByKey() {
 				});
 				break;
 			}
+			case constants.FILTER_ELEMENT_TYPE.TREE_CHECKBOX: {
+				let itemFromResult = result.find(comparedItem => comparedItem.key === `${item.key}_${item.diagnosisLevel}`, true);
+				if (!itemFromResult) {
+					itemFromResult = {
+						view: item.view,
+						key: `${item.key}_${item.diagnosisLevel}`,
+						datatype: item.datatype,
+						values: []
+					};
+					result.push(itemFromResult);
+				}
+				itemFromResult.values.push(_prepareOptionNameForApi(item.value, `${item.key}_${item.diagnosisLevel}`));
+				break;
+			}
 			default:
 			{
 				break;
@@ -369,6 +399,7 @@ function _prepareCondition(filter) {
 	let result = [];
 	switch (filter.view) {
 		case "checkbox":
+		case constants.FILTER_ELEMENT_TYPE.TREE_CHECKBOX:
 		{
 			_prepareValuesCondition(filter, result);
 			break;
@@ -390,15 +421,46 @@ function _prepareCondition(filter) {
 function getConditionsForApi() {
 	const conditions = {};
 	conditions.operands = [];
+	const diagnosisRegex = /^diagnosis_\d$/;
+	const diagnosisFilters = _groupFiltersByKey().filter(f => diagnosisRegex.test(f.key));
 	const groupedFilters = _groupFiltersByKey()
-		.filter(groupedFilter => groupedFilter.key !== constants.COLLECTION_KEY);
+		.filter(groupedFilter => groupedFilter.key !== constants.COLLECTION_KEY
+			&& !diagnosisRegex.test(groupedFilter.key));
+	if (diagnosisFilters.length !== 0) {
+		conditions.operator = diagnosisFilters.length > 1 ? "OR" : "";
+		diagnosisFilters.forEach((d) => {
+			conditions.operands.push(...(_prepareCondition(d)));
+		});
+	}
+	let query = diagnosisFilters.length > 0 ? "(" : "";
+	conditions.operands.forEach((itemOfConditions, paramIndex) => {
+		if (paramIndex > 0) {
+			if (itemOfConditions.operator.toUpperCase() === "OR") {
+				query += itemOfConditions.type === "number" || itemOfConditions.type === "boolean" || itemOfConditions.value.includes("[")
+					? ` ${itemOfConditions.operator.toUpperCase()} ${itemOfConditions.key}:${itemOfConditions.value}${itemOfConditions.closingBracket}`
+					: ` ${itemOfConditions.operator.toUpperCase()} ${itemOfConditions.key}:"${itemOfConditions.value}"${itemOfConditions.closingBracket}`;
+			}
+			else {
+				query += itemOfConditions.type === "number" || itemOfConditions.type === "boolean" || itemOfConditions.value.includes("[")
+					? ` ${conditions.operator.toUpperCase()} ${itemOfConditions.openingBracket}${itemOfConditions.key}:${itemOfConditions.value}`
+					: ` ${conditions.operator.toUpperCase()} ${itemOfConditions.openingBracket}${itemOfConditions.key}:"${itemOfConditions.value}"`;
+			}
+		}
+		else {
+			query += itemOfConditions.type === "number" || itemOfConditions.type === "boolean" || itemOfConditions.value.includes("[")
+				? `${itemOfConditions.openingBracket}${itemOfConditions.key}:${itemOfConditions.value}${itemOfConditions.closingBracket}`
+				: `${itemOfConditions.openingBracket}${itemOfConditions.key}:"${itemOfConditions.value}"${itemOfConditions.closingBracket}`;
+		}
+	});
+	query += query === "" ? "" : ")";
+	conditions.operands.length = 0;
 	if (groupedFilters.length !== 0) {
+		query += query === "" ? "" : " AND ";
 		conditions.operator = groupedFilters.length > 1 ? "AND" : "";
 		groupedFilters.forEach((groupedFilter) => {
 			conditions.operands.push(...(_prepareCondition(groupedFilter)));
 		});
 	}
-	let query = "";
 	conditions.operands.forEach((itemOfConditions, paramIndex) => {
 		if (paramIndex > 0) {
 			if (itemOfConditions.operator.toUpperCase() === "OR") {
@@ -446,6 +508,11 @@ function getFiltersFromURL(filtersArray) {
 		.map((filter) => {
 			let filterId;
 			if (typeof filter === "object") {
+				if (filter.type === constants.FILTER_ELEMENT_TYPE.TREE_CHECKBOX) {
+					const view = $$(filter.viewId);
+					view.checkItem(filter.optionId);
+					return null;
+				}
 				filterId = filter.id;
 			}
 			else if (filter.includes(constants.COLLECTION_KEY)) {
@@ -470,7 +537,20 @@ function getFiltersFromURL(filtersArray) {
 }
 
 function convertAppliedFiltersToParams() {
-	return JSON.stringify(getFiltersArray().map(filter => filter.id));
+	return JSON.stringify(getFiltersArray().map((filter) => {
+		if (filter.view === constants.FILTER_ELEMENT_TYPE.TREE_CHECKBOX) {
+			return {type: filter.view, viewId: filter.viewId, optionId: filter.optionId};
+		}
+		return filter.id;
+	}));
+}
+
+function getAppliedCollectionsForApi() {
+	const filtersArray = getFiltersArray();
+	const appliedCollections = filtersArray
+		.filter(filter => filter.key === constants.COLLECTION_KEY);
+	const result = appliedCollections.map(collection => collection.optionId);
+	return result.length > 0 ? result.join(",") : "";
 }
 
 export default {
@@ -489,7 +569,8 @@ export default {
 	getFilterValue,
 	getShowedFiltersCollection,
 	getFiltersFromURL,
-	convertAppliedFiltersToParams
+	convertAppliedFiltersToParams,
+	getAppliedCollectionsForApi,
 };
 
 // TODO: rewrite example
